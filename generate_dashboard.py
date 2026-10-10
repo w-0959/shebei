@@ -58,11 +58,11 @@ def main():
     cur.close(); c.close()
 
     total = len(recs)
-    # 默认取"前一天"为统计基准（每天凌晨1点自动刷新前一整天的数据）；可传日期参数手动指定
+    # 默认取"当前日期"为统计基准（每小时间自动刷新，显示最新到当前的数据）；可传日期参数手动指定
     if len(sys.argv) > 1:
         today = datetime.date.fromisoformat(sys.argv[1])
     else:
-        today = datetime.date.today() - datetime.timedelta(days=1)
+        today = datetime.date.today()
     def cnt_since(since):
         s = since.strftime("%Y-%m-%d")
         return sum(1 for r in recs if r["date"] >= s)
