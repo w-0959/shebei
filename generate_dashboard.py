@@ -59,7 +59,7 @@ def main():
     cur.close(); c.close()
 
     total = len(recs)
-    # 默认取"当前日期"为统计基准（每小时间自动刷新，显示最新到当前的数据）；可传日期参数手动指定
+    # 默认取"当前日期"为统计基准（可每小时间自动刷新，显示最新到当前的数据）；可传日期参数手动指定
     if len(sys.argv) > 1:
         today = datetime.date.fromisoformat(sys.argv[1])
     else:
@@ -101,27 +101,62 @@ def main():
     # 近30天每日
     day_start = today - datetime.timedelta(days=29)
     dc = Counter(r["date"] for r in recs if r["date"])
-    ddates, dnums = [], []
+    ddates, dnums, dfull = [], [], []
     dd = day_start
     while dd <= today:
-        s = dd.strftime("%Y-%m-%d"); ddates.append(s[5:]); dnums.append(dc.get(s,0)); dd += datetime.timedelta(days=1)
+        s = dd.strftime("%Y-%m-%d"); ddates.append(s[5:]); dfull.append(s); dnums.append(dc.get(s,0)); dd += datetime.timedelta(days=1)
 
     recent = recs[:80]
 
     # 重点巡查人员：近30天每日巡查记录数 + 近30天累计
+    # 注意：必须用完整日期（YYYY-MM-DD）匹配，不能只比"月-日"，否则会把去年同一天的记录错算进今年
+    date_idx = {s: i for i, s in enumerate(dfull)}
     person_series = {p: [0]*len(ddates) for p in PEOPLE}
     for r in recs:
         p = r.get("inspector")
         if p not in person_series:
             continue
         if r["date"]:
-            try:
-                idx = ddates.index(r["date"][5:])
-            except ValueError:
+            idx = date_idx.get(r["date"])
+            if idx is None:
                 continue
             person_series[p][idx] += 1
     person_totals = [{"name": p, "value": sum(person_series[p])} for p in PEOPLE]
     person_totals.sort(key=lambda x: -x["value"])
+
+    # ============ 数据自检（独立复核，防止日期/人员错配把脏数据发上线）============
+    # 用另一条独立连接/SQL 按"完整日期 + 巡查人"重新聚合，与前面的 Python 统计逐格比对；
+    # 任何一格不一致即报错退出（GitHub Actions 变红，不发布错误页面）。
+    ph = ", ".join(["%s"] * len(PEOPLE))
+    vc = pymysql.connect(**DB); vcur = vc.cursor()
+    vq = ("SELECT DATE(`记录时间`) d, `巡查人_3472187` p, COUNT(*) FROM table_d93 "
+          "WHERE `所属单位_3730135`=%s AND `记录时间`>=%s AND `记录时间`<%s "
+          "AND `巡查人_3472187` IN (" + ph + ") GROUP BY d, p")
+    vcur.execute(vq, (UNIT, day_start.strftime("%Y-%m-%d"),
+                      (today + datetime.timedelta(days=1)).strftime("%Y-%m-%d")) + tuple(PEOPLE))
+    sql_map = {}
+    for d, p, n in vcur.fetchall():
+        ds = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+        sql_map[(ds, p)] = n
+    vcur.close(); vc.close()
+
+    errs = []
+    for p in PEOPLE:
+        for i, s in enumerate(dfull):
+            db_v = sql_map.get((s, p), 0)
+            if person_series[p][i] != db_v:
+                errs.append(f"{s}/{p}: 看板{person_series[p][i]} vs 数据库{db_v}")
+    for (ds, p), n in sql_map.items():
+        if ds not in date_idx:
+            errs.append(f"{ds}/{p}: 数据库有记录({n})但不在近30天窗口内")
+    if errs:
+        print("[自检] ❌ 按人按日统计与数据库不一致：")
+        for e in errs[:20]:
+            print("   ", e)
+        print("[自检] 已中止，未生成页面（避免把错误数据发布上线）。")
+        sys.exit(1)
+    print("[自检] ✅ 按人按日统计与数据库完全一致（%d 人 × %d 天）" % (len(PEOPLE), len(dfull)))
+    # ==============================================================================
 
     data = {
         "gen_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
